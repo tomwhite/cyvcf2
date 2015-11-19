@@ -442,6 +442,8 @@ cdef class Variant(object):
     cdef bcf1_t *b
     cdef VCF vcf
     cdef int *_gt_types
+    cdef int *s_gt_types
+
     cdef int *_gt_ref_depths
     cdef int *_gt_alt_depths
     cdef int *_gt_phased
@@ -459,6 +461,7 @@ cdef class Variant(object):
     def __cinit__(self):
         self.b = NULL
         self._gt_types = NULL
+        self.s_gt_types = NULL
         self._gt_phased = NULL
         self._gt_pls = NULL
         self._ploidy = -1
@@ -624,6 +627,14 @@ cdef class Variant(object):
                     n+=1
             return n
 
+    property gt_array:
+        def __get__(self):
+            if self._gt_types == NULL:
+                self.gt_types
+            cdef np.npy_intp shape[1]
+            shape[0] = self.vcf.n_samples * self._ploidy
+            return np.PyArray_SimpleNewFromData(1, shape, np.NPY_INT32, self.s_gt_types)
+
     property gt_types:
         def __get__(self):
             cdef int ndst, ngts, n, i, nper, j = 0, k = 0
@@ -634,8 +645,14 @@ cdef class Variant(object):
                 self._gt_phased = <int *>stdlib.malloc(sizeof(int) * self.vcf.n_samples)
                 ndst = 0
                 ngts = bcf_get_genotypes(self.vcf.hdr, self.b, &self._gt_types, &ndst)
+                print "OK"
+                ndst = 0
+                ngts = bcf_get_genotypes(self.vcf.hdr, self.b, &self.s_gt_types, &ndst)
+                print "OK"
+
                 nper = ndst / self.vcf.n_samples
                 self._ploidy = nper
+                print ndst, ngts
                 self._gt_idxs = <int *>stdlib.malloc(sizeof(int) * self.vcf.n_samples * nper)
                 for i in range(0, ndst, nper):
                     for k in range(i, i + nper):
@@ -656,6 +673,22 @@ cdef class Variant(object):
             cdef np.npy_intp shape[1]
             shape[0] = <np.npy_intp> self.vcf.n_samples
             return np.PyArray_SimpleNewFromData(1, shape, np.NPY_INT32, self._gt_types)
+
+    def is_phased2(self):
+        return self.gt_array[1::self.ploidy]&1
+  
+    def gt_allele2(self):
+        v = (self.gt_array>>1) - 1
+        v[v < 0] = -1
+        return v.reshape((len(v)/self.ploidy), self.ploidy)
+  
+    def is_missing2(self):
+        vals = []
+        cdef int i
+        for i in range(self.ploidy):
+            vals.append(((self.gt_array[i::ploidy]>>1) == 0) | (self.gt_array[i::ploidy] < 0))
+        return np.array(vals).T
+
 
     property ploidy:
         def __get__(self):
