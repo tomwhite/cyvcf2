@@ -37,64 +37,32 @@ def par_relatedness(vcf_path, samples, ncpus, min_depth=5, each=1,
 
         arrays = np.load(fname)
         os.unlink(fname)
-        vibs, vn, vhets, n_samples = arrays['ibs'], arrays['n'], arrays['hets'], n
+        vibs, vn, vhets, vdepth, n_samples = arrays['ibs'], arrays['n'], arrays['hets'], arrays['depth'], n
 
         if aibs is None:
-            aibs, an, ahets = vibs, vn, vhets
+            aibs, an, adepth, ahets = vibs, vn, vdepth, vhets
         else:
             aibs += vibs
             an += vn
+            adepth += vdepth
             ahets += vhets
 
     return VCF(vcf_path, samples=samples)._relatedness_finish(aibs[:n_samples, :n_samples],
                                                               an[:n_samples, :n_samples],
-                                                              ahets[:n_samples])
-
-
-def par_het(vcf_path, samples, ncpus, min_depth=8, percentiles=(10, 90),
-                  int each=1, int offset=0):
-    from multiprocessing import Pool
-    p = Pool(ncpus)
-
-    any_counts, sum_counts, het_counts = 0, 0, 0
-    all_gt_types, mean_depths, sites = [], [], []
-    maf_lists = defaultdict(list)
-    for ret in p.imap_unordered(_par_het, [(vcf_path, samples, min_depth, i, ncpus, each) for i in range(ncpus)]):
-        (mean_depths_, maf_lists_, het_counts_, sum_counts_,
-                all_gt_types_, sites_, any_counts_) = ret
-        mean_depths.extend(mean_depths_)
-        any_counts += any_counts_
-        sites.extend(sites_)
-        all_gt_types.extend(all_gt_types_)
-        sum_counts += sum_counts_ # an array
-        het_counts += het_counts_ # an array
-        for k, li in maf_lists_.iteritems():
-            maf_lists[k].extend(li)
-    mean_depths = np.array(mean_depths, dtype=np.int32).T
-    vcf = VCF(vcf_path, samples=samples, gts012=True)
-    return vcf._finish_het(mean_depths, maf_lists,
-                           percentiles,
-                           het_counts, sum_counts, all_gt_types,
-                           sites, any_counts)
-
-
-def _par_het(args):
-    vcf_path, samples, min_depth, offset, ncpus, each = args
-    each *= ncpus
-    vcf = VCF(vcf_path, samples=samples, gts012=True)
-    return vcf.het_check(min_depth=min_depth, each=each, offset=offset, _finish=False)
-
+                                                              ahets[:n_samples],
+                                                              adepth)
 
 def _par_relatedness(args):
     vcf_path, samples, min_depth, offset, ncpus, each, sites, n_sites_samples = args
     vcf = VCF(vcf_path, samples=samples, gts012=True)
     each = each * ncpus
-    vibs, vn, vhet, n_samples, all_samples = vcf._site_relatedness(min_depth=min_depth, offset=offset, each=each, sites=sites, n_sites_samples=n_sites_samples)
+    vibs, vn, vhet, n_samples, all_samples, idepths = vcf._site_relatedness(min_depth=min_depth, offset=offset, each=each, sites=sites, n_sites_samples=n_sites_samples)
     # to get around limits of multiprocessing size of transmitted data, we save
     # the arrays to disk and return the file
     fname = tempfile.mktemp(suffix=".npz")
     atexit.register(os.unlink, fname)
-    np.savez_compressed(fname, ibs=np.asarray(vibs), hets=np.asarray(vhet), n=np.asarray(vn))
+    np.savez_compressed(fname, ibs=np.asarray(vibs), hets=np.asarray(vhet),
+            n=np.asarray(vn), depths=idepths)
     return fname, n_samples
 
 cdef unicode xstr(s):
@@ -457,57 +425,6 @@ cdef class VCF(object):
                     if k > 20000: break
         return all_samples, extras, gen
 
-    def het_check(self, min_depth=8, percentiles=(10, 90), _finish=True,
-                  int each=1, int offset=0):
-
-        cdef int i, k, n_samples = len(self.samples)
-        cdef Variant v
-        cdef np.ndarray het_counts = np.zeros((n_samples,), dtype=np.int32)
-
-        cdef np.ndarray sum_depths = np.zeros((n_samples,), dtype=np.int32)
-        cdef np.ndarray sum_counts = np.zeros((n_samples,), dtype=np.int32)
-        cdef int any_counts = 0
-
-        # keep the sites and gts that we used for PCA
-        sites, all_gt_types = [], []
-
-        mean_depths = []
-
-        _, _, gen = self.gen_variants(each=each, offset=offset)
-        maf_lists = defaultdict(list)
-        idxs = np.arange(n_samples)
-        for i, v in gen():
-            if v.CHROM in ('X', 'chrX'): break
-            if v.aaf < 0.01: continue
-            if v.call_rate < 0.5: continue
-            sites.append("%s:%d:%s:%s" % (v.CHROM, v.start + 1, v.REF, v.ALT[0]))
-            alts = v.gt_alt_depths
-            assert len(alts) == n_samples
-            depths = (alts + v.gt_ref_depths).astype(np.int32)
-            sum_depths += depths
-            sum_counts += (depths > min_depth)
-            any_counts += 1
-            mean_depths.append(depths)
-
-            mafs = alts / depths.astype(float)
-            gt_types = v.gt_types
-            hets = gt_types == 1
-            het_counts[hets] += 1
-            for k in idxs[hets]:
-                if depths[k] <= min_depth: continue
-                maf_lists[k].append(mafs[k])
-            all_gt_types.append(np.array(gt_types, dtype=np.uint8))
-
-
-        if _finish:
-            mean_depths = np.array(mean_depths, dtype=np.int32).T
-            return self._finish_het(mean_depths, maf_lists,
-                                    percentiles,
-                                    het_counts, sum_counts, all_gt_types,
-                                    sites, any_counts)
-        return (mean_depths, maf_lists, het_counts, sum_counts,
-                all_gt_types, sites, any_counts)
-
 
     def _finish_het(self, mean_depths, maf_lists, percentiles, het_counts,
             sum_counts, all_gt_types, sites, any_counts):
@@ -529,12 +446,13 @@ cdef class VCF(object):
     def site_relatedness(self, sites=op.join(op.dirname(__file__), '1kg.sites'),
                          min_depth=5, each=1):
 
-        vibs, vn, vhet, n_samples, all_samples = self._site_relatedness(sites=sites, min_depth=min_depth, each=each)
+        vibs, vn, vhet, n_samples, all_samples, idepths = self._site_relatedness(sites=sites, min_depth=min_depth, each=each)
         if n_samples != all_samples:
             return self._relatedness_finish(vibs[:n_samples, :n_samples],
                                             vn[:n_samples, :n_samples],
-                                            vhet[:n_samples])
-        return self._relatedness_finish(vibs, vn, vhet)
+                                            vhet[:n_samples],
+                                            idepths)
+        return self._relatedness_finish(vibs, vn, vhet, idepths)
 
 
     cdef _site_relatedness(self, sites=op.join(op.dirname(__file__), '1kg.sites'),
@@ -548,7 +466,7 @@ cdef class VCF(object):
         """
         cdef int n_samples = len(self.samples)
         cdef int all_samples
-        cdef int k, i
+        cdef int k, i, m = 0
         cdef int32_t[:, ::view.contiguous] extras
         assert each >= 0
 
@@ -559,7 +477,9 @@ cdef class VCF(object):
         cdef int32_t[:, ::view.contiguous] n = np.zeros((all_samples, all_samples), np.int32)
         cdef int32_t[:] hets = np.zeros((all_samples, ), np.int32)
         cdef int32_t[:] all_gt_types = np.zeros((all_samples, ), np.int32)
-        cdef int32_t[:] depths = np.zeros((n_samples, ), np.int32)
+        # save 30 sets of sums / 100 to get an idea of the median.
+        cdef int n_s = 200
+        cdef np.ndarray sum_depths = np.zeros((n_s, n_samples), np.float64)
 
         cdef Variant v
 
@@ -571,12 +491,15 @@ cdef class VCF(object):
                     all_gt_types[k] = v._gt_types[k]
                     if depths[k] < min_depth:
                         all_gt_types[k] = 3 # UNKNOWN
+                    sum_depths[m % n_s] += depths / 100.0
+                    m += 1
                 all_gt_types[n_samples:] = extras[i, :]
                 v.relatedness_extra(ibs, n, hets, all_gt_types, all_samples)
             else:
                 v.relatedness(ibs, n, hets)
 
-        return ibs, n, hets, n_samples, all_samples
+        asum_depths = np.asarray(sum_depths) / m * 100
+        return ibs, n, hets, n_samples, all_samples, asum_depths
 
     def relatedness(self, int n_variants=35000, int gap=30000, float min_af=0.04,
                     float max_af=0.8, float linkage_max=0.2, min_depth=8):
@@ -593,6 +516,8 @@ cdef class VCF(object):
         cdef int32_t[:, ::view.contiguous] ibs = np.zeros((n_samples, n_samples), np.int32)
         cdef int32_t[:, ::view.contiguous] n = np.zeros((n_samples, n_samples), np.int32)
         cdef int32_t[:] hets = np.zeros((n_samples, ), np.int32)
+        cdef int n_s = 200
+        cdef np.ndarray sum_depths = np.zeros((n_s, n_samples), np.float64)
 
         for v in self:
             nvt += 1
@@ -626,19 +551,26 @@ cdef class VCF(object):
 
             v.relatedness(ibs, n, hets)
             nv += 1
+            sum_depths[nv % n_s] += v.gt_depths / 100.0
             if nv == n_variants:
                 break
         sys.stderr.write("tested: %d variants out of %d\n" % (nv, nvt))
-        return self._relatedness_finish(ibs, n, hets)
+        asum_depths = np.asarray(sum_depths) / nv * 100
+        return self._relatedness_finish(ibs, n, hets, sum_depths)
 
-    cdef dict _relatedness_finish(self, 
+    def _relatedness_finish(self, 
                                   int32_t[:, ::view.contiguous] _ibs,
                                   int32_t[:, ::view.contiguous] _n,
-                                  int32_t[:] _hets):
+                                  int32_t[:] _hets,
+                                  double[:, ::view.contiguous] idepths):
         samples = self.samples
         #ibs = np.asarray(_ibs)
         #hets = np.asarray(_hets)
         #n = np.asarray(_n)
+        idepths = np.asarray(idepths)
+
+
+
 
         cdef int sj, sk, ns = len(samples)
         res = {'sample_a': [], 'sample_b': [], 
@@ -651,6 +583,11 @@ cdef class VCF(object):
                'n': array('I')}
 
         cdef float bot
+        hets = {'sample_id': samples, 
+                'mean_depth': np.mean(idepths, axis=1),
+                'median_depth': np.median(idepths, axis=1), 
+                'het_count': [], # take mean of those from pairwise sites
+                'sampled_sites': []} # take mean of those from pairwise sites
 
         for sj in range(ns):
             sample_j = samples[sj]
