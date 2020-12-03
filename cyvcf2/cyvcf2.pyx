@@ -1451,8 +1451,8 @@ cdef class Variant(object):
             size = data.shape[0]
             if len((<object>data).shape) > 1:
                 size *= data.shape[1]
+            data[np.isnan(data)] = bcf_float_missing
             afloat = data.astype(np.float32).reshape((size,))
-            afloat[afloat == np.nan] = bcf_float_missing
             ret = bcf_update_format_float(self.vcf.hdr, self.b, to_bytes(name), &afloat[0], size)
         elif np.issubdtype(data.dtype, np.bytes_):
             if len((<object>data).shape) > 1:
