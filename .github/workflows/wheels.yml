@@ -1,9 +1,6 @@
 name: Wheels
 
-on: 
-  push:
-    tags:
-      - 'v*.*.*'
+on: [push]
 
 jobs:
   build_wheels:
